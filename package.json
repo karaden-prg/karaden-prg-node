@@ -1,6 +1,6 @@
 {
   "name": "karaden-prg-node",
-  "version": "1.2.0",
+  "version": "1.2.1",
   "description": "Node.js library for the Karaden API.",
   "main": "lib/index.js",
   "types": "types/index.d.ts",
