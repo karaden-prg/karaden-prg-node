@@ -1,6 +1,3 @@
-import * as jsonServer from 'json-server';
-import * as express from 'express';
-import { Application } from 'express';
 import { RequestOptions, RequestOptionsBuilder } from '../src';
 
 export class TestHelper {
@@ -17,16 +14,9 @@ export class TestHelper {
             .withApiVersion(this.API_VERSION);
     }
 
-    protected static app?: Application;
-
-    public static getMockServer() {
-        if (!this.app) {
-            const app = jsonServer.create();
-            //app.use(express.json());
-            //app.use(express.urlencoded({ extended: true }));
-            app.use(express.text({ type: 'application/x-www-form-urlencoded' }));
-            this.app = app;
-        }
-        return this.app;
+    public static toBody(formData: FormData): string {
+        return [...formData.keys()]
+            .map((key: string) => `${encodeURIComponent(key)}=${encodeURIComponent(formData.get(key)!.toString())}`)
+            .join('&');
     }
 }

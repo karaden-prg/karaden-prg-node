@@ -1,26 +1,32 @@
-import { Application } from 'express';
-import { Server } from 'http';
+import { randomUUID } from 'crypto';
 import { BulkFile } from '../../src';
 import { TestHelper } from '../helper';
+import { HttpResponse, http } from 'msw';
+import { setupServer } from 'msw/node';
 
-let app: Application;
-beforeAll(() => (app = TestHelper.getMockServer()));
+const server = setupServer();
 
-let server: Server;
-afterEach(() => server.close());
+beforeAll(() => server.listen());
+afterEach(() => server.resetHandlers());
+afterAll(() => server.close());
 
 test('一括送信用CSVのアップロード先URLを発行できる', async () => {
     const requestOptions = TestHelper.defaultRequestOptionsBuilder.build();
 
-    app.post(`/${requestOptions.tenantId}/messages/bulks/files`, (req, res) => {
-        res.status(200).json({
-            result: 'OK',
-        });
-    });
-    server = app.listen(4010);
+    const id = randomUUID();
+    server.use(
+        http.post(requestOptions.getBaseUri() + `/messages/bulks/files`, async () =>
+            HttpResponse.json({
+                id: id,
+                object: 'bulk_file',
+                created_at: '2024-03-01T00:00:00+09:00',
+                expires_at: '2024-03-01T00:00:00+09:00',
+            })
+        )
+    );
 
     const bulkFile = await BulkFile.create(requestOptions);
-    expect(bulkFile.getProperty('result')).toBe('OK');
+    expect(bulkFile.id).toBe(id);
 });
 
 test('urlを出力できる', () => {
