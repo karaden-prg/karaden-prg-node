@@ -1,14 +1,15 @@
-import { Application } from 'express';
-import { Server } from 'http';
+import { randomUUID } from 'crypto';
 import { Message, MessageCancelParams, MessageCreateParams, MessageDetailParams, MessageListParams } from '../../src';
-import { Carrier, Result, SentResult, Status } from '../../src/model';
+import { Carrier, Collection, Result, SentResult, Status } from '../../src/model';
 import { TestHelper } from '../helper';
+import { HttpResponse, http } from 'msw';
+import { setupServer } from 'msw/node';
 
-let app: Application;
-beforeAll(() => (app = TestHelper.getMockServer()));
+const server = setupServer();
 
-let server: Server;
-afterEach(() => server.close());
+beforeAll(() => server.listen());
+afterEach(() => server.resetHandlers());
+afterAll(() => server.close());
 
 test('メッセージを作成できる', async () => {
     const params = MessageCreateParams.newBuilder()
@@ -19,65 +20,76 @@ test('メッセージを作成できる', async () => {
         .build();
     const requestOptions = TestHelper.defaultRequestOptionsBuilder.build();
 
-    app.post(`/${requestOptions.tenantId}${params.toPath()}`, (req, res) => {
-        res.status(200).json({
-            result: {
-                body: req.body,
-                'content-type': req.header('content-type'),
-            },
-        });
-    });
-    server = app.listen(4010);
+    const id = randomUUID();
+    server.use(
+        http.post(requestOptions.getBaseUri() + params.toPath(), async ({ request }) => {
+            const formData = await request.formData();
+            return request.headers.get('Content-Type') == 'application/x-www-form-urlencoded'
+                ? HttpResponse.json({
+                      id: id,
+                      object: 'message',
+                      service_id: parseInt(formData.get('service_id')!.toString()),
+                      to: formData.get('to'),
+                      body: formData.get('body'),
+                      tags: [formData.get('tags[0]'), formData.get('tags[1]')],
+                  })
+                : HttpResponse.error();
+        })
+    );
 
     const message = await Message.create(params, requestOptions);
-    const result = message.getProperty('result');
-    expect(result.getProperty('content-type')).toBe('application/x-www-form-urlencoded');
-    expect(result.getProperty('body')).toBe('service_id=1&to=to&body=body&tags%5B0%5D=a&tags%5B1%5D=b');
+    expect(message.id).toBe(id);
+    expect(message.object).toBe('message');
+    expect(message.serviceId).toBe(params.serviceId);
+    expect(message.to).toBe(params.to);
+    expect(message.body).toBe(params.body);
+    expect(message.tags).toStrictEqual(params.tags);
 });
 
 test('メッセージの詳細を取得できる', async () => {
-    const params = MessageDetailParams.newBuilder().withId('id').build();
+    const params = MessageDetailParams.newBuilder().withId(randomUUID()).build();
     const requestOptions = TestHelper.defaultRequestOptionsBuilder.build();
 
-    app.get(`/${requestOptions.tenantId}${params.toPath()}`, (req, res) => {
-        res.status(200).json({
-            result: 'OK',
-        });
-    });
-    server = app.listen(4010);
+    server.use(
+        http.get(requestOptions.getBaseUri() + params.toPath(), async ({ request }) =>
+            HttpResponse.json({
+                id: request.url.substring(request.url.lastIndexOf('/') + 1),
+                object: 'message',
+            })
+        )
+    );
 
     const message = await Message.detail(params, requestOptions);
-    expect(message.getProperty('result')).toBe('OK');
+    expect(message.id).toBe(params.id);
 });
 
 test('メッセージの一覧を取得できる', async () => {
     const params = MessageListParams.newBuilder().build();
     const requestOptions = TestHelper.defaultRequestOptionsBuilder.build();
 
-    app.get(`/${requestOptions.tenantId}${params.toPath()}`, (req, res) => {
-        res.status(200).json({
-            result: 'OK',
-        });
-    });
-    server = app.listen(4010);
+    server.use(http.get(requestOptions.getBaseUri() + params.toPath(), () => HttpResponse.json({ object: 'list' })));
 
-    const message = await Message.list(params, requestOptions);
-    expect(message.getProperty('result')).toBe('OK');
+    const list = await Message.list(params, requestOptions);
+    expect(list).toBeInstanceOf(Collection);
 });
 
 test('メッセージの送信をキャンセルできる', async () => {
-    const params = MessageCancelParams.newBuilder().withId('id').build();
+    const params = MessageCancelParams.newBuilder().withId(randomUUID()).build();
     const requestOptions = TestHelper.defaultRequestOptionsBuilder.build();
 
-    app.post(`/${requestOptions.tenantId}${params.toPath()}`, (req, res) => {
-        res.status(200).json({
-            result: 'OK',
-        });
-    });
-    server = app.listen(4010);
+    server.use(
+        http.post(requestOptions.getBaseUri() + params.toPath(), ({ request }) => {
+            const end = request.url.lastIndexOf('/cancel');
+            const start = request.url.lastIndexOf('/', end - 1) + 1;
+            return HttpResponse.json({
+                id: request.url.substring(start, end),
+                object: 'message',
+            });
+        })
+    );
 
     const message = await Message.cancel(params, requestOptions);
-    expect(message.getProperty('result')).toBe('OK');
+    expect(message.id).toBe(params.id);
 });
 
 test('serviceIdを出力できる', () => {

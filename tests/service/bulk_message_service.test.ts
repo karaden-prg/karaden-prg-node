@@ -2,8 +2,6 @@ import axios from 'axios';
 import * as fs from 'fs';
 import * as tmp from 'tmp';
 import * as path from 'path';
-import { Application } from 'express';
-import { Server } from 'http';
 import {
     BulkMessageCreateParams,
     BulkMessageDownloadParams,
@@ -17,61 +15,58 @@ import {
     FileNotFoundException,
 } from '../../src';
 import { TestHelper } from '../helper';
+import { HttpResponse, http } from 'msw';
+import { setupServer } from 'msw/node';
+import { randomUUID } from 'crypto';
+import { BulkMessageStatus } from '../../src/model';
 
-let app: Application;
-let server: Server;
+const server = setupServer();
 
-beforeAll(() => {
+const id = randomUUID();
+
+beforeAll(() => server.listen());
+beforeEach(() => {
     const requestOptions = TestHelper.defaultRequestOptionsBuilder.build();
-    app = TestHelper.getMockServer();
-    app.post(`/${requestOptions.tenantId}/messages/bulks/files`, (req, res) => {
-        res.status(200).json({
-            id: '741121d7-3f7e-ed85-9fac-28d87835528e',
-            object: 'bulk_file',
-            url: 'https://example.com',
-            created_at: '2023-12-01T15:00:00.0Z',
-            expires_at: '2023-12-01T15:00:00.0Z',
-        });
-    });
-
     const params = BulkMessageCreateParams.newBuilder().build();
-    app.post(`/${requestOptions.tenantId}${params.toPath()}`, (req, res) => {
-        res.status(200).json({
-            id: 'ef931182-80ff-611c-c878-871a08bb5a6a',
-            object: 'bulk_message',
-            status: 'processing',
-            created_at: '2023-12-01T15:00:00.0Z',
-            updated_at: '2023-12-01T15:00:00.0Z',
-        });
-    });
-
-    const showParams = BulkMessageShowParams.newBuilder().withId('ef931182-80ff-611c-c878-871a08bb5a6a').build();
-    app.get(`/${requestOptions.tenantId}${showParams.toPath()}`, (req, res) => {
-        res.status(200).json({
-            id: 'ef931182-80ff-611c-c878-871a08bb5a6a',
-            object: 'bulk_message',
-            status: 'done',
-            created_at: '2023-12-01T15:00:00.0Z',
-            updated_at: '2023-12-01T15:00:00.0Z',
-        });
-    });
-
-    const listMessageParams = BulkMessageListMessageParams.newBuilder()
-        .withId('ef931182-80ff-611c-c878-871a08bb5a6a')
-        .build();
-    app.get(`/${requestOptions.tenantId}${listMessageParams.toPath()}`, (req, res) => {
-        res.writeHead(302, {
-            Location: 'http://localhost:4010/example.com',
-        });
-        res.end();
-    });
+    const showParams = BulkMessageShowParams.newBuilder().withId(id).build();
+    const listMessageParams = BulkMessageListMessageParams.newBuilder().withId(showParams.id).build();
+    server.use(
+        http.post(requestOptions.getBaseUri() + `/messages/bulks/files`, () =>
+            HttpResponse.json({
+                id: randomUUID(),
+                object: 'bulk_file',
+                url: 'https://example.com',
+                created_at: '2023-12-01T15:00:00.0Z',
+                expires_at: '2023-12-01T15:00:00.0Z',
+            })
+        ),
+        http.post(requestOptions.getBaseUri() + params.toPath(), () =>
+            HttpResponse.json({
+                id: showParams.id,
+                object: 'bulk_message',
+                status: BulkMessageStatus.Processing,
+                created_at: '2023-12-01T15:00:00.0Z',
+                updated_at: '2023-12-01T15:00:00.0Z',
+            })
+        ),
+        http.get(requestOptions.getBaseUri() + showParams.toPath(), () =>
+            HttpResponse.json({
+                id: showParams.id,
+                object: 'bulk_message',
+                status: BulkMessageStatus.Done,
+                created_at: '2023-12-01T15:00:00.0Z',
+                updated_at: '2023-12-01T15:00:00.0Z',
+            })
+        ),
+        http.get(requestOptions.getBaseUri() + listMessageParams.toPath(), () =>
+            HttpResponse.redirect(requestOptions.apiBase + '/example.com', 302)
+        )
+    );
 });
-
-afterEach(() => server.close());
+afterEach(() => server.resetHandlers());
+afterAll(() => server.close());
 
 test('bulkMessageオブジェクトが返る', async () => {
-    server = app.listen(4010);
-
     const requestOptions = TestHelper.defaultRequestOptionsBuilder.build();
     const tmpFile = tmp.fileSync();
     const filename = tmpFile.name;
@@ -93,20 +88,18 @@ test('ファイルがダウンロードできる', async () => {
     const requestOptions = TestHelper.defaultRequestOptionsBuilder.build();
     const filename = 'file.json';
     const fileContents = 'file contents';
-    app.get('/example.com', (req, res) => {
-        res.writeHead(200, {
-            'content-disposition': 'attachment;filename="' + filename + "\";filename*=UTF-8''" + filename,
-        });
-        res.end(fileContents);
-    });
-
-    server = app.listen(4010);
+    server.use(
+        http.get(requestOptions.apiBase + '/example.com', () =>
+            HttpResponse.text(fileContents, {
+                headers: {
+                    'content-disposition': 'attachment;filename="' + filename + "\";filename*=UTF-8''" + filename,
+                },
+            })
+        )
+    );
 
     const tmpdir = fs.mkdtempSync('/tmp/test_');
-    const downlosdParams = BulkMessageDownloadParams.newBuilder()
-        .withId('ef931182-80ff-611c-c878-871a08bb5a6a')
-        .withDirectoryPath(tmpdir)
-        .build();
+    const downlosdParams = BulkMessageDownloadParams.newBuilder().withId(id).withDirectoryPath(tmpdir).build();
 
     await BulkMessageService.download(downlosdParams, requestOptions);
     expect(fs.existsSync(path.join(path.resolve(tmpdir, filename)))).toBe(true);
@@ -116,22 +109,22 @@ test('ファイルがダウンロードできる', async () => {
 
 test('bulkMessageのstatusがdone以外でリトライ回数を超過した場合はエラー', async () => {
     const requestOptions = TestHelper.defaultRequestOptionsBuilder.build();
-    const showParams = BulkMessageShowParams.newBuilder().withId('error-1').build();
-    app.get(`/${requestOptions.tenantId}${showParams.toPath()}`, (req, res) => {
-        res.status(200).json({
-            id: 'ef931182-80ff-611c-c878-871a08bb5a6a',
-            object: 'bulk_message',
-            status: 'processing',
-            created_at: '2023-12-01T15:00:00.0Z',
-            updated_at: '2023-12-01T15:00:00.0Z',
-        });
-    });
-
-    server = app.listen(4010);
+    const showParams = BulkMessageShowParams.newBuilder().withId(randomUUID()).build();
+    server.use(
+        http.get(requestOptions.getBaseUri() + showParams.toPath(), () =>
+            HttpResponse.json({
+                id: showParams.id,
+                object: 'bulk_message',
+                status: BulkMessageStatus.Processing,
+                created_at: '2023-12-01T15:00:00.0Z',
+                updated_at: '2023-12-01T15:00:00.0Z',
+            })
+        )
+    );
 
     const tmpdir = fs.mkdtempSync('/tmp/test_');
     const downlosdParams = BulkMessageDownloadParams.newBuilder()
-        .withId('error-1')
+        .withId(showParams.id)
         .withDirectoryPath(tmpdir)
         .withMaxRetries(1)
         .withRetryInterval(10)
@@ -143,28 +136,27 @@ test('bulkMessageのstatusがdone以外でリトライ回数を超過した場�
 
 test('結果取得APIが202を返しリトライ回数を超過した場合はエラー', async () => {
     const requestOptions = TestHelper.defaultRequestOptionsBuilder.build();
-    const showParams = BulkMessageShowParams.newBuilder().withId('error-2').build();
-    app.get(`/${requestOptions.tenantId}${showParams.toPath()}`, (req, res) => {
-        res.status(200).json({
-            id: 'ef931182-80ff-611c-c878-871a08bb5a6a',
-            object: 'bulk_message',
-            status: 'done',
-            created_at: '2023-12-01T15:00:00.0Z',
-            updated_at: '2023-12-01T15:00:00.0Z',
-        });
-    });
-
-    const listMessageParams = BulkMessageListMessageParams.newBuilder().withId('error-2').build();
-    app.get(`/${requestOptions.tenantId}${listMessageParams.toPath()}`, (req, res) => {
-        res.writeHead(202, {});
-        res.end();
-    });
-
-    server = app.listen(4010);
+    const showParams = BulkMessageShowParams.newBuilder().withId(randomUUID()).build();
+    const listMessageParams = BulkMessageListMessageParams.newBuilder().withId(showParams.id).build();
+    server.use(
+        http.get(requestOptions.getBaseUri() + showParams.toPath(), () =>
+            HttpResponse.json({
+                id: showParams.id,
+                object: 'bulk_message',
+                status: BulkMessageStatus.Done,
+                created_at: '2023-12-01T15:00:00.0Z',
+                updated_at: '2023-12-01T15:00:00.0Z',
+            })
+        ),
+        http.get(
+            requestOptions.getBaseUri() + listMessageParams.toPath(),
+            () => new HttpResponse(null, { status: 202 })
+        )
+    );
 
     const tmpdir = fs.mkdtempSync('/tmp/test_');
     const downlosdParams = BulkMessageDownloadParams.newBuilder()
-        .withId('error-2')
+        .withId(showParams.id)
         .withDirectoryPath(tmpdir)
         .withMaxRetries(1)
         .withRetryInterval(10)
@@ -176,22 +168,22 @@ test('結果取得APIが202を返しリトライ回数を超過した場合は�
 
 test('bulkMessageのstatusがerrorはエラー', async () => {
     const requestOptions = TestHelper.defaultRequestOptionsBuilder.build();
-    const showParams = BulkMessageShowParams.newBuilder().withId('error-3').build();
-    app.get(`/${requestOptions.tenantId}${showParams.toPath()}`, (req, res) => {
-        res.status(200).json({
-            id: 'ef931182-80ff-611c-c878-871a08bb5a6a',
-            object: 'bulk_message',
-            status: 'error',
-            created_at: '2023-12-01T15:00:00.0Z',
-            updated_at: '2023-12-01T15:00:00.0Z',
-        });
-    });
-
-    server = app.listen(4010);
+    const showParams = BulkMessageShowParams.newBuilder().withId(randomUUID()).build();
+    server.use(
+        http.get(requestOptions.getBaseUri() + showParams.toPath(), () =>
+            HttpResponse.json({
+                id: showParams.id,
+                object: 'bulk_message',
+                status: 'error',
+                created_at: '2023-12-01T15:00:00.0Z',
+                updated_at: '2023-12-01T15:00:00.0Z',
+            })
+        )
+    );
 
     const tmpdir = fs.mkdtempSync('/tmp/test_');
     const downlosdParams = BulkMessageDownloadParams.newBuilder()
-        .withId('error-3')
+        .withId(showParams.id)
         .withDirectoryPath(tmpdir)
         .withMaxRetries(1)
         .withRetryInterval(10)
@@ -203,37 +195,35 @@ test('bulkMessageのstatusがerrorはエラー', async () => {
 
 test('ファイルダウンロード処理にエラーが発生した場合は例外が飛ぶ', async () => {
     const requestOptions = TestHelper.defaultRequestOptionsBuilder.build();
-    const showParams = BulkMessageShowParams.newBuilder().withId('error-4').build();
-    app.get(`/${requestOptions.tenantId}${showParams.toPath()}`, (req, res) => {
-        res.status(200).json({
-            id: 'ef931182-80ff-611c-c878-871a08bb5a6a',
-            object: 'bulk_message',
-            status: 'done',
-            created_at: '2023-12-01T15:00:00.0Z',
-            updated_at: '2023-12-01T15:00:00.0Z',
-        });
-    });
-
-    const listMessageParams = BulkMessageListMessageParams.newBuilder().withId('error-4').build();
-    app.get(`/${requestOptions.tenantId}${listMessageParams.toPath()}`, (req, res) => {
-        res.writeHead(302, {
-            Location: 'http://localhost:4010/invalid.com',
-        });
-        res.end();
-    });
-
-    app.get('/invalid.com', (req, res) => {
-        res.writeHead(200, {
-            'content-disposition': 'invalid',
-        });
-        res.end();
-    });
-
-    server = app.listen(4010);
+    const showParams = BulkMessageShowParams.newBuilder().withId(randomUUID()).build();
+    const listMessageParams = BulkMessageListMessageParams.newBuilder().withId(showParams.id).build();
+    server.use(
+        http.get(requestOptions.getBaseUri() + showParams.toPath(), () =>
+            HttpResponse.json({
+                id: showParams.id,
+                object: 'bulk_message',
+                status: BulkMessageStatus.Done,
+                created_at: '2023-12-01T15:00:00.0Z',
+                updated_at: '2023-12-01T15:00:00.0Z',
+            })
+        ),
+        http.get(requestOptions.getBaseUri() + listMessageParams.toPath(), () =>
+            HttpResponse.redirect(requestOptions.apiBase + '/invalid.com', 302)
+        ),
+        http.get(
+            requestOptions.apiBase + '/invalid.com',
+            () =>
+                new HttpResponse(null, {
+                    headers: {
+                        'Content-Disposition': 'invalid',
+                    },
+                })
+        )
+    );
 
     const tmpdir = fs.mkdtempSync('/tmp/test_');
     const downlosdParams = BulkMessageDownloadParams.newBuilder()
-        .withId('error-4')
+        .withId(showParams.id)
         .withDirectoryPath(tmpdir)
         .withMaxRetries(1)
         .withRetryInterval(10)
